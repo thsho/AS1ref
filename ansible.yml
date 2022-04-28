@@ -1,0 +1,95 @@
+---
+
+- hosts: local
+  become: yes
+  
+  tasks:
+    - name: Check status of PermitRootLogin
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "PermitRootLogin no"
+        state: present
+      check_mode: yes
+      register: prl
+
+    - name: Check status of PermitEmptyPasswords
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "PermitEmptyPasswords no"
+        state: present
+      check_mode: yes
+      register: pep
+
+    - name: Check if Protocol 2 exists
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "Protocol 2"
+        state: present
+      check_mode: yes
+      register: ptwo   
+
+    - name: Ensure password expiration is 90 days or less
+      lineinfile:
+        dest: /etc/login.defs
+        regexp: '\b^PASS_MAX_DAYS\s*([0-9]|[1-8][0-9]|90)\b'
+        line: "PASS_MAX_DAYS   90"
+        state: absent
+      check_mode: yes
+      register: passmax
+
+    - name: Extract shell info from /etc/passwd
+      shell: |
+        getent passwd | awk -F ':' '$3>1 && $3<1000' > sysacshell.txt
+        cat sysacshell.txt | grep -v 'nologin' > shellerror.log
+        grep -v 'nologin' shellerror.log
+        if [ $? = 0 ]
+          then
+            echo -e $(cat shellerror.log | grep -v 'nologin') > shellerroroutput.log
+          else
+            echo -e $(cat shellerror.log | grep -v 'nologin') > /dev/null
+        fi
+    - name: Check if shellerror.log exists
+      stat:
+        path: "shellerroroutput.log"
+      register: sherr 
+
+    - debug:
+        msg: 
+          - "{{ 'NON-COMPLIANT: PermitRootLogin status is wrong.\n' if prl.changed else 'COMPLIANT: PermitRootLogin status is OK.\n' }}"
+          - "{{ 'NON-COMPLIANT: PermitEmptyPasswords status is wrong.\n' if pep.changed else 'COMPLIANT: PermitEmptyPasswords status is OK.\n' }}"
+          - "{{ 'NON-COMPLIANT: Protocol 2 not supported.\n' if ptwo.changed else 'COMPLIANT: Protocol 2 is enabled\n' }}"
+          - "{{ 'NON-COMPLIANT: PASS_MAX_DAYS status is more than 90 days.\n' if not passmax.found else 'COMPLIANT: PASS_MAX_DAYS status is OK.\n' }}"
+          - "{{ 'NON-COMPLIANT: System accounts login shell not secured.\n' if sherr.stat.exists else 'COMPLIANT: System accounts shell login OK.' }}"
+      register: statusoutput
+
+    - name: Echo to log file
+      shell: echo "\n$(date)\n{{statusoutput}}" >> ASB_COMPLIANCE_CHECK.log
+
+    - name: Create a null file
+      shell: echo $(date)
+      register: adate
+
+    - name: Send email if there are any alerts
+      mail: 
+        subtype: html
+        host: localhost
+        port: 25
+        to: hsho <hsho@mail.com>
+        subject: Ansible - SYSTEM COMPLIANCE ERROR {{ adate.stdout }}
+        body: 
+          - <p>{{ 'NON-COMPLIANT; SSH root login is enabled' if prl.changed else '' }}</p>
+          - <p>{{ 'NON-COMPLIANT; SSH PermitEmptyPasswords is enabled' if pep.changed else ''}}</p>
+          - <p>{{ 'NON-COMPLIANT; SSH Protocol is not 2' if ptwo.changed else ''}}</p>
+          - <p>{{ 'NON-COMPLIANT; Password expiration is more than 90 days.' if not passmax.found else ''}}</p>
+          - <p>{{ 'NON-COMPLIANT; System accounts are not secured to nonlogin' if sherr.stat.exists else ''}}</p>
+      when: 
+        - prl.changed or pep.changed or ptwo.changed or not passmax.found or sherr.stat.exists
+
+    - name: Delete files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - sysacshell.txt
+        - shellerror.log
+        - shellerroroutput.log
